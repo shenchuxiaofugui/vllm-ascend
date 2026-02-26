@@ -30,6 +30,7 @@ from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 class EplbUpdator:
     def __init__(self, eplb_config, loader: D2DExpertWeightLoader, eplb_process: EplbProcess, process):
         self.eplb_config = eplb_config
+        self.multi_stage = eplb_config.eplb_policy_type == 3
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
         self.eplb_process = eplb_process
@@ -134,13 +135,23 @@ class EplbUpdator:
 
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload()
-        moe_load = self.comm_group.all_gather(local_load, dim=0).reshape(-1, self.world_size, *local_load.shape[1:])
+        moe_load = (
+            self.comm_group.all_gather(local_load, dim=0).reshape(-1, self.world_size, *local_load.shape[1:]).cpu()
+        )
 
-        self.shared_dict["moe_load"] = moe_load.cpu()
+        if self.multi_stage:
+            moe_load_cum = moe_load.permute(2, 0, 1, 3)
+            moe_load_dff = moe_load_cum[..., 1:] - moe_load_cum.roll(shifts=1, dims=3)[..., 1:]
+            moe_load = torch.cat([moe_load_cum[..., :1], moe_load_dff], dim=3)
+
+        self.shared_dict["moe_load"] = moe_load
         logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
 
         if dist.get_rank() == 0:
-            self.compute_moe_imbalance(moe_load)
+            if self.multi_stage:
+                self.compute_moe_imbalance(moe_load.sum(0))
+            else:
+                self.compute_moe_imbalance(moe_load)
             self.summarize_moe_imbalance()
 
         return moe_load
