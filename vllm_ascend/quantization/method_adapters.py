@@ -296,7 +296,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
     @property
     def supports_eplb(self):
-        supports_eplb = getattr(self.quant_method, "supports_eplb", False)
+        supports_eplb = getattr(self.quant_method, "supports_eplb", True)
         return supports_eplb
 
 
